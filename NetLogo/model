@@ -1,0 +1,262 @@
+globals [
+  current-round
+  matchup-data
+  file-open?
+  rep-weight  ; Starting reputation score weight
+  rep-weight-update  ; Update of the weight parameter
+  rep-weight-discount  ; Time discount of the weight parameter
+  learn-rate  ; Rate at which agents learn and update their beliefs and self-perception
+  adjust-coef  ; Self-correcting coefficient to ensure self-perception aligns with coop-score
+  own-coef  ; Coefficient for valuing own beliefs over partner's reputation
+  determinism-parameter  ; Influences the stochasticity of decision making
+  r  ; Reward for mutual cooperation
+  s  ; Sucker's payoff when one cooperates and the other defects
+  t  ; Temptation to defect when the other cooperates
+  p  ; Punishment for mutual defection
+]
+
+breed [genpops genpop]
+breed [combers comber]
+
+genpops-own [
+  coop-score  ; Agent's inherent cooperativeness
+  repscore-total  ; Agent's total reputation score
+  repscore-start  ; Agent's starting reputation score
+  repscore-game  ; Agent's reputation score acquired throughout the game
+  agent-type  ; Type of agent, e.g., "genpop"
+  times-cooperated  ; The number of times the agent has cooperated
+  belief-about-partner  ; Beliefs about the likelihood of a partner's cooperation
+  self-perception  ; Agent's perception of their own cooperativeness
+  unilateral-defections ; Tracks whether the genpop has experienced a unilateral defection
+]
+
+combers-own [
+  coop-score
+  repscore-total
+  repscore-start
+  repscore-game
+  agent-type
+  times-cooperated
+  belief-about-partner
+  self-perception
+  unilateral-defections
+]
+
+to setup
+  clear-all
+  set current-round 0
+  set matchup-data []
+  set file-open? false
+  set rep-weight 0.6  ; Initialize rep-weight to 0.5 or some other starting value
+  set rep-weight-update 0.1  ; Set rep-weight-update to some value that determines how much rep-weight changes
+  set rep-weight-discount 0.01  ; Decay rate for time discounting of rep-weight
+  set learn-rate 0.1  ; Learning rate for updating beliefs and self-perception
+  set adjust-coef 0.1  ; Self-adjusting coefficient for self-perception
+  set own-coef 0.1  ; Coefficient for valuing own beliefs over partner's reputation
+  set determinism-parameter 1  ; Determines how deterministic the decision-making is
+  set r 3  ; Reward for mutual cooperation
+  set s 0  ; Sucker's payoff
+  set t 5  ; Temptation to defect
+  set p 1  ; Punishment for mutual defection
+
+  if not file-open? [
+    file-open "matchup_data.csv"
+    set file-open? true
+    ; Write the headers for the data file
+    file-write "Round,Agent1,Agent2,AgentType1,AgentType2,RepScore1,RepScore2,Decision1,Decision2"
+    file-print ""  ; Add a newline after the headers
+  ]
+
+  ; Initialize agents with starting values for beliefs and self-perception
+  create-genpops num-genpops [
+    set coop-score random-beta 2 5  ; Example starting values, adjust as needed
+    set repscore-start 0
+    set repscore-game 0
+    set repscore-total repscore-start + repscore-game
+    set color blue
+    set agent-type "genpop"
+    set times-cooperated 0
+    set belief-about-partner 0.5  ; Neutral starting belief about partner
+    set self-perception 0.5       ; Neutral starting self-perception
+  ]
+
+  create-combers num-combers [
+    set coop-score random-beta 5 2  ; Example starting values, adjust as needed
+
+    let upper-limit (coop-score * (1 - coop-score))
+    let var random-float upper-limit
+
+    let alpha coop-score * ((coop-score * (1 - coop-score)) / var - 1)
+    let beta (1 - coop-score) * ((coop-score * (1 - coop-score)) / var - 1)
+
+    set repscore-start random-beta alpha beta
+    set repscore-game 0
+    set repscore-total repscore-start + repscore-game
+    set color red
+    set agent-type "comber"
+    set times-cooperated 0
+    set belief-about-partner 0.5
+    set self-perception 0.5
+  ]
+
+  reset-ticks
+  plot-coop-score-distributions
+end
+
+to play-game
+  ; Reset unilateral-defections for all agents at the start of each round
+  ask turtles [
+    set unilateral-defections 0
+  ]
+
+  ; Sort agents based on their total reputation score in descending order
+  let sorted-agents sort-by [ [a b] -> ([repscore-total] of a > [repscore-total] of b) ] turtles
+  let i 0
+  set current-round ticks
+
+  ; Pair agents and process decisions and outcomes
+  while [i < (length sorted-agents - 1)] [
+    let agent1 item i sorted-agents
+    let agent2 item (i + 1) sorted-agents
+
+    ; Agents decide whether to cooperate or defect
+    let decision1 decide-action agent1
+    let decision2 decide-action agent2
+
+    ; Update times-cooperated based on the decisions
+    if decision1 = "coop" [
+      ask agent1 [ set times-cooperated times-cooperated + 1 ]
+    ]
+    if decision2 = "coop" [
+      ask agent2 [ set times-cooperated times-cooperated + 1 ]
+    ]
+
+    ; Record matchup data
+    set matchup-data lput (list current-round
+                                      [who] of agent1
+                                      [who] of agent2
+                                      [agent-type] of agent1
+                                      [agent-type] of agent2
+                                      [repscore-total] of agent1
+                                      [repscore-total] of agent2
+                                      decision1
+                                      decision2) matchup-data
+
+    ; Update beliefs and self-perception after the interaction
+    ask agent1 [
+      update-beliefs-and-self-perception agent2 decision1 decision2
+    ]
+    ask agent2 [
+      update-beliefs-and-self-perception agent1 decision2 decision1
+    ]
+
+    set i (i + 2)  ; Increment the counter to move to the next pair
+  ]
+
+  ; Update the rep-weight based on unilateral defections and apply time discount
+  let total-UD sum [unilateral-defections] of combers
+  set rep-weight rep-weight - rep-weight-update * total-UD
+  set rep-weight rep-weight * exp(- rep-weight-discount * current-round)
+
+ ; Update the rep score for all agents based on their cooperation history
+ask turtles [
+  if current-round > 0 [
+    let new-repscore-game times-cooperated / current-round
+    set repscore-game new-repscore-game
+    set repscore-total rep-weight * repscore-start + (1 - rep-weight) * repscore-game
+  ]
+]
+
+end
+
+
+to-report decide-action [some-agent]
+  ; Calculate the utility of cooperating and defecting
+  let U_C [self-perception] of some-agent * ([belief-about-partner] of some-agent * r + (1 - [belief-about-partner] of some-agent) * s)
+  let U_D (1 - [self-perception] of some-agent) * ([belief-about-partner] of some-agent * t + (1 - [belief-about-partner] of some-agent) * p)
+
+  ; Calculate the probability of cooperating based on the utility functions
+  let P_C exp(determinism-parameter * U_C) / (exp(determinism-parameter * U_C) + exp(determinism-parameter * U_D))
+
+  ; Make a decision based on the probability P_C
+  report ifelse-value (random-float 1 < P_C) ["coop"] ["defect"]
+end
+
+
+to update-beliefs-and-self-perception [partner decision1 decision2]
+  ; Convert decisions to numerical values for calculations
+  let decision1-value ifelse-value (decision1 = "coop") [1] [0]
+  let decision2-value ifelse-value (decision2 = "coop") [1] [0]
+
+  ; Update self-perception based on the decision made and the learning rate
+  set self-perception self-perception + learn-rate * (decision1-value - self-perception) +
+                       adjust-coef * ([coop-score] of self - self-perception)
+
+  ; Update belief-about-partner based on the partner's decision and reputation score
+  set belief-about-partner (1 - own-coef) * (belief-about-partner + learn-rate * (decision2-value - belief-about-partner)) +
+                       own-coef * ([repscore-total] of partner - belief-about-partner)
+end
+
+
+to-report random-beta [alpha beta]
+  ; Generating a beta-distributed random number using the method provided earlier
+  let y1 random-gamma alpha 1
+  let y2 random-gamma beta 1
+  while [y1 + y2 = 0] [
+    set y1 random-gamma alpha 1
+    set y2 random-gamma beta 1
+  ]
+  report y1 / (y1 + y2)
+end
+
+
+to plot-coop-score-distributions
+  ; Clear the previous plots
+  set-current-plot "Genpop Cooperativeness Distribution"
+  clear-plot
+  set-current-plot "Comber Cooperativeness Distribution"
+  clear-plot
+
+  ; Plot genpop coop-score distribution
+  set-current-plot "Genpop Cooperativeness Distribution"
+  plot-distribution genpops
+
+  ; Plot comber coop-score distribution
+  set-current-plot "Comber Cooperativeness Distribution"
+  plot-distribution combers
+end
+
+to plot-distribution [agent-set]
+  ; Assuming coop-score ranges from 0 to 1 in steps of 0.01
+  let min-coop 0
+  let max-coop 1
+  let step 0.01
+
+  ; Count and plot the frequency of each coop-score
+  while [min-coop <= max-coop] [
+    let counting count agent-set with [coop-score >= min-coop and coop-score < min-coop + step]
+    plotxy min-coop counting
+    set min-coop min-coop + step
+  ]
+end
+
+
+
+
+to go
+  play-game  ; Run the main game loop
+
+  ; Write the matchup data to the file
+  if file-open? [
+    foreach matchup-data [
+      data ->
+      file-write (word item 0 data "," item 1 data "," item 2 data "," item 3 data "," item 4 data "," item 5 data "," item 6 data "," item 7 data "," item 8 data)
+      file-print ""  ; Add a newline at the end of each line
+    ]
+  ]
+
+  ; Clear the matchup data for the next round
+  set matchup-data []
+
+  tick  ; Advance the tick counter
+end
